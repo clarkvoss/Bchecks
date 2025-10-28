@@ -1,66 +1,47 @@
-# Cassandra CQL Injection Detection
-# Tests syntax break, injection via concatenation, and boolean-based CQLi
+metadata:
+    language: v2-beta
+    name: "Cassandra CQL Injection Detection"
+    description: "Error-based, boolean-blind and Collaborator OOB checks for Cassandra CQL (parser-safe, non-destructive)."
+    author: "You"
 
-given insertion_point: "request"  # For URL params or body in CQL queries
+define:
+    payload_err = "'"
+    # boolean payloads — use ALLOW FILTERING for non-indexed predicates
+    payload_true = " AND 1=1 ALLOW FILTERING"
+    payload_false = " AND 1=0 ALLOW FILTERING"
+    # optional heavy-limit payload (commented by default; enable only if your Burp supports timing)
+    # payload_limit = " LIMIT 1000000 ALLOW FILTERING"
 
-# Extract baseline response
-extract original_body from response.body
-extract original_status from response.status
-extract original_time from response.time
+given insertion point then
 
-# 1. Syntax Break: Trigger CQL syntax error
-send request:
-  replace insertion_point with insertion_point + "'"
-if regex `Cassandra syntax error|Invalid CQL|unterminated string` in response.body then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "Cassandra CQL Injection (Syntax Break)"
-    detail: "Cassandra syntax error detected with payload: {insertion_point + '''}. Response: {regex `Cassandra syntax error|Invalid CQL|unterminated string`}"
-    remediation: "Use prepared statements; bind parameters."
-end if
+    # 1) Syntax / error-based: append single-quote to provoke CQL error messages
+    send payload: appending: {payload_err}
+    if {latest.response} matches "(?i)syntax error at|InvalidRequestException|InvalidQueryException|SyntaxException|unterminated string|unclosed quotation mark" then
+        report issue: name: "Cassandra CQL Injection (Error-Based)" severity: high confidence: certain remediation: "Use prepared statements and bind parameters; do not concatenate user input into CQL queries." detail: "CQL/Cassandra error text observed after appending a quote; possible CQL injection."
+    end if
 
-# 2. Injection Bypass: Append CQL to break WHERE
-send request:
-  replace insertion_point with insertion_point + "'; DROP TABLE users;--"`  # Classic attempt, though limited
-extract bypass_response from response.body
+    # 2) Boolean-based blind: non-destructive true/false checks using ALLOW FILTERING
+    send payload called true_check: appending: {payload_true}
+    send payload called false_check: appending: {payload_false}
+    if {true_check.response} differs from {false_check.response} then
+        report issue: name: "Cassandra CQL Injection (Boolean-Based)" severity: high confidence: firm remediation: "Avoid dynamic query construction; use prepared statements and parameter binding in drivers (e.g., DataStax)." detail: "Responses differ between boolean true and false payloads; possible boolean-based CQL injection."
+    end if
 
-if bypass_response != original_body and response.status == 200 then  # Unexpected success
-  report issue:
-    severity: high
-    confidence: firm
-    name: "Cassandra CQL Injection (Bypass)"
-    detail: "Potential CQL bypass with DROP payload. Response changed from original."
-    remediation: "Enforce prepared statements in drivers (e.g., DataStax)."
-end if
+    # 3) Safe OOB: Collaborator via header (non-destructive)
+    send request called collab_check: method: "GET" headers: "Referer": {generate_collaborator_address()} path: "/"
+    if dns interactions then
+        report issue: name: "Cassandra CQL Injection (Out-of-Band)" severity: high confidence: certain remediation: "Avoid passing untrusted values into code that can trigger external network interactions; use prepared statements and sanitization." detail: "Burp Collaborator observed DNS interactions after sending a request with the collaborator address in a header; possible OOB injection."
+    end if
 
-# 3. Boolean-Based: True/false conditions in WHERE
-send request:
-  replace insertion_point with insertion_point + " AND 1=1 ALLOW FILTERING"`  # True, with ALLOW for non-indexed
-extract true_response from response.body
+    # Optional time-based heuristic (commented by default — enable only if your Burp supports {latest.response.time} or {latest.response.time_ms})
+    # send payload: appending: {payload_limit}
+    # if ({latest.response.time} - {base.response.time}) >= 4.5 then
+    #     report issue: name: "Cassandra CQL Injection (Time-Based - sec)" severity: high confidence: tentative remediation: "Limit query sizes and avoid enabling ALLOW FILTERING; use pagination." detail: "Response delayed by large LIMIT payload; timing indicates possible injection or heavy query execution."
+    # end if
+    #
+    # If your Burp exposes time_ms instead, use:
+    # send payload: appending: {payload_limit}
+    # if ({latest.response.time_ms} - {base.response.time_ms}) >= 4500 then
+    #     report issue: name: "Cassandra CQL Injection (Time-Based - ms)" severity: high confidence: tentative remediation: "Limit query sizes and avoid enabling ALLOW FILTERING; use pagination." detail: "Response delayed by large LIMIT payload; timing indicates possible injection or heavy query execution."
+    # end if
 
-send request:
-  replace insertion_point with insertion_point + " AND 1=0 ALLOW FILTERING"`  # False
-extract false_response from response.body
-
-if true_response != false_response and true_response == original_body then
-  report issue:
-    severity: high
-    confidence: firm
-    name: "Cassandra CQL Injection (Boolean-Based)"
-    detail: "Response differed between true/false conditions. True payload: {insertion_point + ' AND 1=1 ALLOW FILTERING'}"
-    remediation: "Avoid dynamic CQL; use parameterized queries."
-end if
-
-# 4. Time-Based: Limited; use heavy query for delay
-send request:
-  replace insertion_point with insertion_point + " LIMIT 1000000 ALLOW FILTERING"`  # Force large result set
-  set timeout to 10 seconds
-if response.time > original_time + 5000 then
-  report issue:
-    severity: high
-    confidence: tentative
-    name: "Cassandra CQL Injection (Time-Based)"
-    detail: "Response delayed by {response.time - original_time}ms with large LIMIT payload."
-    remediation: "Limit query sizes; use pagination."
-end if
