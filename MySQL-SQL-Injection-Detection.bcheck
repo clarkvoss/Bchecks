@@ -1,64 +1,55 @@
-# Comprehensive SQL Injection Detection for MySQL
-# Tests error-based, boolean-based, time-based, and OOB SQLi
+metadata:
+    language: v2-beta
+    name: "MySQL SQL Injection Detection"
+    description: "Error-based, boolean-blind, time-based (optional) and Collaborator OOB checks for MySQL (parser-safe)."
+    author: "You"
 
-given insertion_point: "request"
+define:
+    payload_err = "'"
+    payload_true = "' AND 1=1-- "
+    payload_false = "' AND 1=2-- "
+    # payload_sleep = "' AND IF(1=1, SLEEP(5), 0)--"    # uncomment only if your Burp supports time/time_ms checks
+    # payload_oob_loadfile = "'; SELECT LOAD_FILE(CONCAT('\\\\', 'test.', {generate_collaborator_address()}, '\\\\foo'))--"  # commented; enable only with authorization
 
-# Extract original response for baseline comparison
-extract original_body from response.body
-extract original_status from response.status
-extract original_time from response.time
+given insertion point then
 
-# 1. Error-Based SQLi: Inject single quote to trigger syntax error
-send request:
-  replace insertion_point with insertion_point + "'"
-if regex `SQL syntax.*error|unclosed quotation|mysql_fetch` in response.body then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "SQL Injection (Error-Based)"
-    detail: "SQL error detected with payload: {insertion_point + '''}. Response: {regex `SQL syntax.*error|unclosed quotation|mysql_fetch`}"
-    remediation: "Use parameterized queries or prepared statements."
-end if
+    # 1) Error-based: append single-quote and look for MySQL error text
+    send payload: appending: {payload_err}
+    if {latest.response} matches "(?i)you have an error in your sql syntax|sql syntax.*error|unclosed quotation|mysql_fetch|syntax to use near|unknown column" then
+        report issue: name: "MySQL SQL Injection (Error-Based)" severity: high confidence: certain remediation: "Use prepared statements and parameter binding; avoid constructing SQL with untrusted input." detail: "MySQL error text observed after appending a quote; possible error-based SQLi."
+    end if
 
-# 2. Boolean-Based Blind SQLi: Check for response content change
-send request:
-  replace insertion_point with insertion_point + "' AND 1=1--"
-extract true_response from response.body
+    # 2) Boolean-based blind: send simple true/false payloads and compare responses
+    send payload called true_check: appending: {payload_true}
+    send payload called false_check: appending: {payload_false}
+    if {true_check.response} differs from {false_check.response} then
+        report issue: name: "MySQL SQL Injection (Boolean-Based Blind)" severity: high confidence: firm remediation: "Validate and sanitize inputs and use parameterized queries." detail: "Responses differ between boolean true and false payloads; possible boolean blind SQLi."
+    end if
 
-send request:
-  replace insertion_point with insertion_point + "' AND 1=2--"
-extract false_response from response.body
+    # Optional: Time-based blind using SLEEP
+    # NOTE: timing fields differ across Burp builds. Only enable the block that matches your environment.
+    # If your Burp supports {latest.response.time} (seconds), uncomment the following two lines (define above and block below).
+    # send payload: appending: {payload_sleep}
+    # if ({latest.response.time} - {base.response.time}) >= 4.5 then
+    #     report issue: name: "MySQL SQL Injection (Time-Based Blind - sec)" severity: high confidence: tentative remediation: "Use prepared statements and parameterize inputs; avoid exposing execution timing differences." detail: "Response delayed by SLEEP payload (~5s); timing indicates possible blind SQLi."
+    # end if
+    #
+    # If your Burp supports {latest.response.time_ms} (milliseconds) instead, use this block (uncomment and adjust define payload):
+    # send payload: appending: {payload_sleep}
+    # if ({latest.response.time_ms} - {base.response.time_ms}) >= 4500 then
+    #     report issue: name: "MySQL SQL Injection (Time-Based Blind - ms)" severity: high confidence: tentative remediation: "Use prepared statements and parameterize inputs; avoid exposing execution timing differences." detail: "Response delayed by SLEEP payload (~5s); timing indicates possible blind SQLi."
+    # end if
 
-if true_response != false_response and true_response == original_body then
-  report issue:
-    severity: high
-    confidence: firm
-    name: "SQL Injection (Boolean-Based Blind)"
-    detail: "Response changed between true (1=1) and false (1=2) conditions. True payload: {insertion_point + ''' AND 1=1--'}"
-    remediation: "Validate and sanitize inputs; use parameterized queries."
-end if
+    # 3) Out-of-Band (Collaborator) — header-based (enabled; safe)
+    # Put a generated collaborator address into a header so Burp can detect DNS/HTTP callbacks.
+    send request called collab_header_check: method: "GET" headers: "Referer": {generate_collaborator_address()} path: "/"
+    if dns interactions then
+        report issue: name: "MySQL SQL Injection (Out-of-Band - header)" severity: high confidence: certain remediation: "Avoid using untrusted input in code that can trigger external network interactions; use least-privilege DB accounts and parameterized queries." detail: "Burp Collaborator observed DNS interactions after sending a request containing the collaborator address in a header; possible OOB SQLi."
+    end if
 
-# 3. Time-Based Blind SQLi: Inject SLEEP to detect delay
-send request:
-  replace insertion_point with insertion_point + "' AND IF(1=1, SLEEP(5), 0)--"
-  set timeout to 10 seconds
-if response.time > original_time + 5000 then
-  report issue:
-    severity: high
-    confidence: tentative
-    name: "SQL Injection (Time-Based Blind)"
-    detail: "Response delayed by {response.time - original_time}ms with payload: {insertion_point + ''' AND IF(1=1, SLEEP(5), 0)--'}"
-    remediation: "Use prepared statements to prevent injection."
-end if
-
-# 4. Out-of-Band SQLi: Use Collaborator for DNS-based detection
-send request:
-  replace insertion_point with insertion_point + "'; SELECT LOAD_FILE(CONCAT('\\\\', 'test.', collaborator_address, '\\foo'))--"
-if dns interactions then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "SQL Injection (Out-of-Band)"
-    detail: "DNS interaction detected via Collaborator with payload: {insertion_point + '''; SELECT LOAD_FILE(CONCAT('\\\\', 'test.', collaborator_address, '\\foo'))--'}"
-    remediation: "Implement strict input validation and parameterized queries."
-end if
+    # Optional: LOAD_FILE-based OOB (commented — DO NOT enable without explicit permission)
+    # This attempts to coerce the DB to reference an external UNC containing the collaborator address; enable only with written authorization.
+    # send payload: appending: {payload_oob_loadfile}
+    # if dns interactions then
+    #     report issue: name: "MySQL SQL Injection (Out-of-Band - LOAD_FILE)" severity: high confidence: certain remediation: "Disable or restrict file access functions (LOAD_FILE); use least-privilege DB accounts and validate inputs." detail: "Burp Collaborator observed DNS interactions after LOAD_FILE-style payload referencing collaborator address; high-confidence OOB SQLi."
+    # end if
