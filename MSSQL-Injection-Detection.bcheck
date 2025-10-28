@@ -1,64 +1,56 @@
-# Microsoft SQL Server SQL Injection Detection
-# Tests error-based, boolean-based, time-based, and OOB SQLi
+metadata:
+    language: v2-beta
+    name: "MSSQL SQLi - merged (parser-safe)"
+    description: "Merged MSSQL SQLi checks: error-based, boolean (basic), Collaborator OOB. Optional time/xp blocks are commented for safe import."
+    author: "You"
 
-given insertion_point: "request"
+define:
+    payload_err = "'"
+    payload_true = "' AND 1=1--"
+    payload_false = "' AND 1=2--"
+    # payload_time_ms = "'; WAITFOR DELAY '00:00:05'--"   # uncomment only if your Burp supports time_ms
+    # payload_time_sec = "'; WAITFOR DELAY '00:00:05'--"  # uncomment only if your Burp supports time (seconds)
+    # payload_xp_template = "'; EXEC master..xp_dirtree '\\\\{generate_collaborator_address()}\\\\foo'--"  # xp_dirtree (commented by default)
 
-# Extract baseline response
-extract original_body from response.body
-extract original_status from response.status
-extract original_time from response.time
+given insertion point then
 
-# 1. Error-Based: Trigger MSSQL syntax error
-send request:
-  replace insertion_point with insertion_point + "'"
-if regex `unclosed quotation mark|syntax error near` in response.body then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "MSSQL SQL Injection (Error-Based)"
-    detail: "MSSQL error detected with payload: {insertion_point + '''}. Response: {regex `unclosed quotation mark|syntax error near`}"
-    remediation: "Use parameterized queries or stored procedures."
-end if
+    # -------- 1) Error-based (always enabled) --------
+    send payload: appending: {payload_err}
+    if {latest.response} matches "(?i)unclosed quotation mark|syntax error near|microsoft sql server" then
+        report issue: name: "MSSQL SQL Injection (Error-Based)" severity: high confidence: certain remediation: "Use parameterized queries and hide DB error messages." detail: "MSSQL error text observed after appending a single quote; likely error-based SQLi."
+    end if
 
-# 2. Boolean-Based Blind: Check response content change
-send request:
-  replace insertion_point with insertion_point + "' AND 1=1--"
-extract true_response from response.body
+    # -------- 2) Boolean-based (simple differ) --------
+    send payload called true_check: appending: {payload_true}
+    send payload called false_check: appending: {payload_false}
+    if {true_check.response} differs from {false_check.response} then
+        report issue: name: "MSSQL SQL Injection (Boolean-Based Blind)" severity: high confidence: firm remediation: "Sanitize inputs and use prepared statements / parameterized queries." detail: "Responses differ between boolean true and false payloads; possible boolean-blind SQLi."
+    end if
 
-send request:
-  replace insertion_point with insertion_point + "' AND 1=2--"
-extract false_response from response.body
+    # -------- 3) OOB (Collaborator) - header-based (always enabled) --------
+    # safe and reliable: places the collaborator address in a header so Burp can detect callbacks
+    send request called collab_header_check: method: "GET" headers: "Referer": {generate_collaborator_address()} path: "/"
+    if dns interactions then
+        report issue: name: "MSSQL SQL Injection (Out-of-Band - header)" severity: high confidence: certain remediation: "Disable/limit xp_* procedures and use least-privilege DB accounts / parameterized queries." detail: "Burp Collaborator observed DNS interactions after a request containing the collaborator address; OOB SQLi may be possible."
+    end if
 
-if true_response != false_response and true_response == original_body then
-  report issue:
-    severity: high
-    confidence: firm
-    name: "MSSQL SQL Injection (Boolean-Based Blind)"
-    detail: "Response changed between true (1=1) and false (1=2) conditions. True payload: {insertion_point + ''' AND 1=1--'}"
-    remediation: "Sanitize inputs and use parameterized queries."
-end if
+    # -------- Optional: xp_dirtree OOB (commented) --------
+    # This injects a UNC path containing the collaborator address into the insertion point to attempt xp_dirtree lookups.
+    # Enable only when you have explicit authorization and understand DB privilege implications.
+    # send payload: appending: {payload_xp_template}
+    # if dns interactions then
+    #     report issue: name: "MSSQL SQL Injection (Out-of-Band - xp_dirtree)" severity: high confidence: certain remediation: "Disable xp_dirtree/xp_cmdshell; use least-privilege DB accounts and parameterized queries." detail: "Burp Collaborator observed DNS interactions after an xp_dirtree-style payload referencing the collaborator address; high-confidence OOB SQLi."
+    # end if
 
-# 3. Time-Based Blind: Use WAITFOR DELAY
-send request:
-  replace insertion_point with insertion_point + "' WAITFOR DELAY '0:0:5'--"
-  set timeout to 10 seconds
-if response.time > original_time + 5000 then
-  report issue:
-    severity: high
-    confidence: tentative
-    name: "MSSQL SQL Injection (Time-Based Blind)"
-    detail: "Response delayed by {response.time - original_time}ms with payload: {insertion_point + ''' WAITFOR DELAY '0:0:5'--'}"
-    remediation: "Use prepared statements to prevent injection."
-end if
-
-# 4. Out-of-Band: DNS via xp_dirtree
-send request:
-  replace insertion_point with insertion_point + "'; EXEC xp_dirtree '\\test.' + collaborator_address + '\foo';--"
-if dns interactions then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "MSSQL SQL Injection (Out-of-Band)"
-    detail: "DNS interaction detected via Collaborator with payload: {insertion_point + '''; EXEC xp_dirtree '\\test.' + collaborator_address + '\foo';--'}"
-    remediation: "Disable xp_dirtree and use parameterized queries."
-end if
+    # -------- Optional: Time-based checks (commented) --------
+    # If your build supports time_ms, uncomment the payload_time_ms define above and the block below:
+    # send payload: appending: {payload_time_ms}
+    # if ({latest.response.time_ms} - {base.response.time_ms}) >= 4500 then
+    #     report issue: name: "MSSQL SQL Injection (Time-Based Blind - ms)" severity: high confidence: tentative remediation: "Use prepared statements and disallow execution of arbitrary SQL fragments." detail: "Response delayed (~5s) by WAITFOR payload; indicates possible blind SQLi."
+    # end if
+    #
+    # If your build supports time (seconds), uncomment payload_time_sec and use this block instead:
+    # send payload: appending: {payload_time_sec}
+    # if ({latest.response.time} - {base.response.time}) >= 4.5 then
+    #     report issue: name: "MSSQL SQL Injection (Time-Based Blind - sec)" severity: high confidence: tentative remediation: "Use prepared statements and disallow execution of arbitrary SQL fragments." detail: "Response delayed (~5s) by WAITFOR payload; indicates possible blind SQLi."
+    # end if
