@@ -1,64 +1,28 @@
-# PostgreSQL SQL Injection Detection
-# Tests error-based, boolean-based, time-based, and OOB SQLi
+metadata:
+    language: v2-beta
+    name: "PostgreSQL SQL Injection Detection"
+    description: "Error-based, boolean-blind and Collaborator OOB checks for PostgreSQL."
+    author: "You"
 
-given insertion_point: "request"
+define:
+    payload_err = "'"
+    payload_true = "' AND 1=1--"
+    payload_false = "' AND 1=2--"
 
-# Extract baseline response
-extract original_body from response.body
-extract original_status from response.status
-extract original_time from response.time
+given insertion point then
 
-# 1. Error-Based: Trigger PostgreSQL syntax error
-send request:
-  replace insertion_point with insertion_point + "'"
-if regex `ERROR:.*syntax error|unterminated quoted string` in response.body then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "PostgreSQL SQL Injection (Error-Based)"
-    detail: "PostgreSQL error detected with payload: {insertion_point + '''}. Response: {regex `ERROR:.*syntax error|unterminated quoted string`}"
-    remediation: "Use parameterized queries or prepared statements."
-end if
+    send payload: appending: {payload_err}
+    if {latest.response} matches "(?i)syntax error at or near|pg::syntaxerror|psql: error|invalid input syntax for" then
+        report issue: name: "PostgreSQL SQL Injection (Error-Based)" severity: high confidence: certain remediation: "Use parameterized queries and prepared statements; avoid string concatenation." detail: "PostgreSQL error text observed after appending a quote; possible error-based SQLi."
+    end if
 
-# 2. Boolean-Based Blind: Check response content change
-send request:
-  replace insertion_point with insertion_point + "' AND 1=1--"
-extract true_response from response.body
+    send payload called true_check: appending: {payload_true}
+    send payload called false_check: appending: {payload_false}
+    if {true_check.response} differs from {false_check.response} then
+        report issue: name: "PostgreSQL SQL Injection (Boolean-Based)" severity: high confidence: firm remediation: "Sanitize inputs and use parameterized queries." detail: "Responses differ between boolean true and false payloads; possible boolean blind SQLi."
+    end if
 
-send request:
-  replace insertion_point with insertion_point + "' AND 1=2--"
-extract false_response from response.body
-
-if true_response != false_response and true_response == original_body then
-  report issue:
-    severity: high
-    confidence: firm
-    name: "PostgreSQL SQL Injection (Boolean-Based Blind)"
-    detail: "Response changed between true (1=1) and false (1=2) conditions. True payload: {insertion_point + ''' AND 1=1--'}"
-    remediation: "Validate and sanitize inputs; use parameterized queries."
-end if
-
-# 3. Time-Based Blind: Use pg_sleep
-send request:
-  replace insertion_point with insertion_point + "' AND pg_sleep(5)--"
-  set timeout to 10 seconds
-if response.time > original_time + 5000 then
-  report issue:
-    severity: high
-    confidence: tentative
-    name: "PostgreSQL SQL Injection (Time-Based Blind)"
-    detail: "Response delayed by {response.time - original_time}ms with payload: {insertion_point + ''' AND pg_sleep(5)--'}"
-    remediation: "Use prepared statements to prevent injection."
-end if
-
-# 4. Out-of-Band: DNS via dblink
-send request:
-  replace insertion_point with insertion_point + "'; SELECT dblink_connect('host=test.' || collaborator_address || ' port=80 user=postgres dbname=postgres');--"
-if dns interactions then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "PostgreSQL SQL Injection (Out-of-Band)"
-    detail: "DNS interaction detected via Collaborator with payload: {insertion_point + '''; SELECT dblink_connect('host=test.' || collaborator_address || ' port=80 user=postgres dbname=postgres');--'}"
-    remediation: "Disable dblink extension and use parameterized queries."
-end if
+    send request called collab_check: method: "GET" headers: "Referer": {generate_collaborator_address()} path: "/"
+    if dns interactions then
+        report issue: name: "PostgreSQL SQL Injection (Out-of-Band)" severity: high confidence: certain remediation: "Prevent DB from using untrusted input in functions that trigger external network calls." detail: "Burp Collaborator observed DNS interactions after sending a request containing the collaborator address; OOB SQLi possible."
+    end if

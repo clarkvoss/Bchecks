@@ -46,10 +46,3 @@ given insertion point then
     if dns interactions then
         report issue: name: "MySQL SQL Injection (Out-of-Band - header)" severity: high confidence: certain remediation: "Avoid using untrusted input in code that can trigger external network interactions; use least-privilege DB accounts and parameterized queries." detail: "Burp Collaborator observed DNS interactions after sending a request containing the collaborator address in a header; possible OOB SQLi."
     end if
-
-    # Optional: LOAD_FILE-based OOB (commented — DO NOT enable without explicit permission)
-    # This attempts to coerce the DB to reference an external UNC containing the collaborator address; enable only with written authorization.
-    # send payload: appending: {payload_oob_loadfile}
-    # if dns interactions then
-    #     report issue: name: "MySQL SQL Injection (Out-of-Band - LOAD_FILE)" severity: high confidence: certain remediation: "Disable or restrict file access functions (LOAD_FILE); use least-privilege DB accounts and validate inputs." detail: "Burp Collaborator observed DNS interactions after LOAD_FILE-style payload referencing collaborator address; high-confidence OOB SQLi."
-    # end if

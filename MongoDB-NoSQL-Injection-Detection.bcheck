@@ -1,66 +1,29 @@
-# MongoDB NoSQL Injection Detection
-# Tests syntax break, operator injection, boolean-based, and time-based NoSQLi
+metadata:
+    language: v2-beta
+    name: "MongoDB NoSQL Injection Detection"
+    description: "Error-based, boolean-blind and Collaborator OOB checks for MongoDB injection vectors."
+    author: "You"
 
-given insertion_point: "json"  # Assumes JSON body (e.g., {"username": "input"})
+define:
+    payload_err = "'"
+    # Common NoSQL-style payloads (injection into JSON-like params)
+    payload_mongo_true = "{\"$ne\": null}"
+    payload_mongo_false = "{\"$eq\": null}"
 
-# Extract baseline response
-extract original_body from response.body
-extract original_status from response.status
-extract original_time from response.time
+given insertion point then
 
-# 1. Syntax Break: Trigger MongoDB error with quote
-send request:
-  replace insertion_point with insertion_point + "'"
-if regex `MongoError|SyntaxError.*JSON|Unexpected token` in response.body then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "MongoDB NoSQL Injection (Syntax Break)"
-    detail: "MongoDB syntax error detected with payload: {insertion_point + '''}. Response: {regex `MongoError|SyntaxError.*JSON|Unexpected token`}"
-    remediation: "Use MongoDB's query builders or parameterized queries; sanitize inputs."
-end if
+    send payload: appending: {payload_err}
+    if {latest.response} matches "(?i)MongoError|E11000 duplicate key error|BSONError|cannot parse|bad query|Command failed" then
+        report issue: name: "MongoDB NoSQL Injection (Error-Based)" severity: high confidence: certain remediation: "Avoid building queries from user input; use safe query APIs and whitelist input." detail: "MongoDB-related error observed after appending payload; possible NoSQL injection."
+    end if
 
-# 2. Operator Injection: Bypass with $ne (always true)
-send request:
-  replace insertion_point with `{"$ne": null}`  # For auth bypass, e.g., password[$ne]=null
-extract bypass_response from response.body
+    send payload called true_check: appending: {payload_mongo_true}
+    send payload called false_check: appending: {payload_mongo_false}
+    if {true_check.response} differs from {false_check.response} then
+        report issue: name: "MongoDB NoSQL Injection (Boolean-Based)" severity: high confidence: firm remediation: "Use parameterized query builders and validate types/structures." detail: "Responses differ for NoSQL boolean-style payloads; possible injection."
+    end if
 
-if bypass_response != original_body and response.status == 200 then  # Success response indicates bypass
-  report issue:
-    severity: high
-    confidence: firm
-    name: "MongoDB NoSQL Injection (Operator Bypass)"
-    detail: "Query bypassed with $ne: null payload. Response changed from original."
-    remediation: "Avoid dynamic query construction; use safe operators like $eq."
-end if
-
-# 3. Boolean-Based: True/false conditions via $where JS
-send request:
-  replace insertion_point with `{"$where": "this.username == 'test'"}`  # True condition
-extract true_response from response.body
-
-send request:
-  replace insertion_point with `{"$where": "this.username == 'invalid'"}`  # False condition
-extract false_response from response.body
-
-if true_response != false_response and true_response == original_body then
-  report issue:
-    severity: high
-    confidence: firm
-    name: "MongoDB NoSQL Injection (Boolean-Based)"
-    detail: "Response differed between true/false $where conditions. True payload: {\"$where\": \"this.username == 'test'\"}"
-    remediation: "Disable $where or sanitize JS inputs; prefer aggregation pipelines."
-end if
-
-# 4. Time-Based: JS delay in $where
-send request:
-  replace insertion_point with `{"$where": "sleep(5000); true"}`  # Simulate delay (MongoDB sleep)
-  set timeout to 10 seconds
-if response.time > original_time + 5000 then
-  report issue:
-    severity: high
-    confidence: tentative
-    name: "MongoDB NoSQL Injection (Time-Based)"
-    detail: "Response delayed by {response.time - original_time}ms with $where sleep payload."
-    remediation: "Disable server-side JS (--noscripting); use safe queries."
-end if
+    send request called collab_check: method: "GET" headers: "Referer": {generate_collaborator_address()} path: "/"
+    if dns interactions then
+        report issue: name: "MongoDB NoSQL Injection (Out-of-Band)" severity: high confidence: certain remediation: "Avoid using untrusted inputs in code that can trigger external network activity." detail: "Burp Collaborator observed DNS interactions after a collaborator-containing request; possible OOB injection."
+    end if

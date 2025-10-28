@@ -38,15 +38,10 @@ given insertion point then
     #     report issue: name: "Oracle SQL Injection (Time-Based Blind - ms)" severity: high confidence: tentative remediation: "Use bind variables and avoid dynamic SQL; limit long-running queries." detail: "Response delayed by DBMS_LOCK.SLEEP payload (~5s); timing indicates possible blind SQLi."
     # end if
 
+given insertion point then
+
     # 3) Safe OOB: Collaborator via header (non-destructive)
     send request called collab_header_check: method: "GET" headers: "Referer": {generate_collaborator_address()} path: "/"
     if dns interactions then
         report issue: name: "Oracle SQL Injection (Out-of-Band)" severity: high confidence: certain remediation: "Disable unnecessary PL/SQL packages and avoid using untrusted input in code that can trigger external network calls." detail: "Burp Collaborator observed DNS interactions after sending a request containing the collaborator address in a header; possible OOB SQLi."
     end if
-
-    # Optional: UTL_INADDR OOB attempt (commented — enable only with explicit authorization)
-    # This attempts to call UTL_INADDR to force a DNS lookup; requires DB privileges and can be noisy.
-    # send payload: appending: {payload_utl}
-    # if dns interactions then
-    #     report issue: name: "Oracle SQL Injection (Out-of-Band - UTL_INADDR)" severity: high confidence: certain remediation: "Disable or restrict UTL_INADDR and similar packages; use least-privilege DB accounts and parameterized queries." detail: "Burp Collaborator observed DNS interactions after UTL_INADDR payload; high-confidence OOB SQLi."
-    # end if

